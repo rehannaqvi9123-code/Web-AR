@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Assembly Line</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #000; overflow: hidden; }
+        
+        /* Camera */
+        .camera-container { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+        #video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        
+        /* Scanner */
+        .scanner-overlay {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 250px; height: 250px; border: 3px solid #00ff88; z-index: 10; pointer-events: none;
+        }
+        .scanner-line {
+            position: absolute; width: 100%; height: 3px; background: #00ff88;
+            animation: scan 2s infinite; box-shadow: 0 0 10px #00ff88;
+        }
+        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+        
+        /* Status */
+        .status-overlay {
+            position: absolute; top: 20px; left: 20px; background: rgba(0, 0, 0, 0.8);
+            color: white; padding: 15px; border-radius: 10px; z-index: 20; max-width: 300px;
+            backdrop-filter: blur(5px);
+        }
+        
+        /* KPI Panel - SIMPLE SIDE PANEL */
+        .kpi-panel {
+            position: absolute; top: 20px; right: 20px; width: 350px;
+            background: rgba(0, 0, 0, 0.95); color: white; border-radius: 12px;
+            padding: 20px; z-index: 30; border: 2px solid #00ff88;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.3); display: none;
+        }
+        .kpi-panel.active { display: block; }
+        .panel-header { 
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.2);
+        }
+        .panel-header h2 { color: #00ff88; font-size: 20px; }
+        .close-btn { background: none; border: none; color: white; font-size: 24px; cursor: pointer; }
+        .kpi-item { 
+            display: flex; justify-content: space-between; padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1); 
+        }
+        .kpi-item:last-child { border-bottom: none; }
+        .kpi-label { color: #aaa; font-size: 14px; }
+        .kpi-value { color: white; font-size: 14px; font-weight: bold; }
+        
+        /* Loading */
+        .loading-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; color: white; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 100;
+        }
+        .loader { 
+            border: 5px solid rgba(255,255,255,0.1); border-top: 5px solid #00ff88;
+            border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        /* Error */
+        .error-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; color: white; display: none; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 100; padding: 20px;
+        }
+        
+        /* Debug Panel */
+        .debug-panel {
+            position: absolute; bottom: 20px; left: 20px; background: rgba(0,0,0,0.8);
+            color: white; padding: 15px; border-radius: 10px; z-index: 25;
+            max-width: 400px; max-height: 200px; overflow-y: auto; font-size: 12px;
+            border: 1px solid #ffaa00; display: none;
+        }
+        .debug-panel.active { display: block; }
+        .debug-toggle {
+            position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7);
+            color: white; border: none; padding: 8px 15px; border-radius: 20px;
+            cursor: pointer; z-index: 25; font-size: 12px;
+        }
+        
+        /* Controls */
+        .controls {
+            position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px; z-index: 20; flex-wrap: wrap; justify-content: center;
+        }
+        .controls button {
+            background: rgba(0,0,0,0.7); color: white; border: none; padding: 12px 20px;
+            border-radius: 50px; cursor: pointer; font-size: 14px; display: flex;
+            align-items: center; gap: 8px; backdrop-filter: blur(5px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+    </style>
+</head>
+<body>
+    <!-- Loading -->
+    <div class="loading-screen" id="loading-screen">
+        <div class="loader"></div>
+        <h2 id="loading-title">Initializing...</h2>
+        <p id="loading-message">Please wait</p>
+    </div>
+    
+    <!-- Error -->
+    <div class="error-screen" id="error-screen">
+        <h2 style="color: #ff5555;">⚠️ Error</h2>
+        <p id="error-message" style="margin: 20px 0;"></p>
+        <button onclick="retryConnection()" style="
+            background: #00ff88; color: #000; border: none; padding: 10px 20px;
+            border-radius: 5px; cursor: pointer; font-weight: bold;
+        ">Retry</button>
+    </div>
+    
+    <!-- Camera -->
+    <div class="camera-container" id="camera-container" style="display: none;">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas" style="display: none;"></canvas>
+        
+        <!-- KPI Panel -->
+        <div class="kpi-panel" id="kpi-panel">
+            <div class="panel-header">
+                <h2 id="panel-title">Machine Details</h2>
+                <button class="close-btn" onclick="hidePanel()">×</button>
+            </div>
+            <div id="panel-content">
+                <!-- Data will be inserted here -->
+            </div>
+        </div>
+        
+        <!-- Scanner -->
+        <div class="scanner-overlay">
+            <div class="scanner-line"></div>
+            <div style="position: absolute; top: -40px; width: 100%; text-align: center; color: white;">
+                🔍 Scan Machine QR Code
+            </div>
+        </div>
+        
+        <!-- Status -->
+        <div class="status-overlay">
+            <h1>🏭 AR Assembly Tracker</h1>
+            <p>📊 Data Source: <span id="data-source" style="color: #00ff88;">Supabase</span></p>
+            <p>✅ Machines Loaded: <span id="machine-count">0</span></p>
+            <p>🔍 Detected: <span id="detection-count">0</span></p>
+        </div>
+        
+        <!-- Debug Panel -->
+        <div class="debug-panel" id="debug-panel">
+            <h3 style="color: #ffaa00; margin-bottom: 10px;">Debug Log</h3>
+            <div id="debug-log"></div>
+        </div>
+        
+        <!-- Debug Toggle -->
+        <button class="debug-toggle" onclick="toggleDebug()">🐛 Debug</button>
+    </div>
+
+    <script>
+        // ==================== DEBUG FUNCTIONS ====================
+        let debugMode = false;
+        const debugLog = document.getElementById('debug-log');
+        
+        function logDebug(message, type = 'info') {
+            if (!debugMode) return;
+            const timestamp = new Date().toLocaleTimeString();
+            const color = type === 'error' ? '#ff5555' : type === 'success' ? '#00ff88' : '#ffaa00';
+            const logEntry = document.createElement('div');
+            logEntry.style.margin = '5px 0';
+            logEntry.style.color = color;
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            debugLog.appendChild(logEntry);
+            debugLog.scrollTop = debugLog.scrollHeight;
+            console.log(`[DEBUG] ${message}`);
+        }
+        
+        function toggleDebug() {
+            debugMode = !debugMode;
+            document.getElementById('debug-panel').classList.toggle('active');
+            logDebug(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`, 'info');
+        }
+        
+        function updateLoading(message) {
+            document.getElementById('loading-message').textContent = message;
+            logDebug(`Loading: ${message}`);
+        }
+        
+        // ==================== SUPABASE SETUP ====================
+        // REMOVED DUPLICATE DECLARATION - KEEP ONLY ONE
+        const SUPABASE_URL = 'https://jfibnjndtmdgugilbswn.supabase.co';
+        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmaWJuam5kdG1kZ3VnaWxic3duIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4NTU5NTUsImV4cCI6MjA4NTQzMTk1NX0.qMkdqgzldJmR7h37xDLpsOFcyjHxNn00DN7aD7K3Z6s';
+        
+        logDebug(`Connecting to Supabase: ${SUPABASE_URL}`, 'info');
+        
+        // Initialize Supabase client - ONLY ONCE
+        window.supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        
+        // ==================== GLOBAL VARIABLES ====================
+        let stream = null;
+        let scanning = false;
+        let machinesData = [];
+        let machinesMap = new Map();
+
+        /** Merge nested JSON / common column aliases so KPIs show even when stored separately from core machine columns. */
+        function normalizeMachineRow(row) {
+            if (!row || typeof row !== 'object') return {};
+            let out = { ...row };
+            const jsonKeys = ['metrics', 'kpis', 'kpi', 'performance', 'data', 'stats', 'telemetry', 'values'];
+            for (const key of jsonKeys) {
+                const v = row[key];
+                if (v != null && typeof v === 'object' && !Array.isArray(v)) {
+                    out = { ...out, ...v };
+                } else if (typeof v === 'string' && v.trim().startsWith('{')) {
+                    try {
+                        const parsed = JSON.parse(v);
+                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                            out = { ...out, ...parsed };
+                        }
+                    } catch (_) { /* ignore */ }
+                }
+            }
+            // Supabase embeds: machine_kpis(*), kpis(*) → array of related rows
+            const embedKeys = ['machine_kpis', 'kpis', 'kpi_metrics', 'metrics'];
+            for (const key of embedKeys) {
+                const v = row[key];
+                if (Array.isArray(v) && v.length > 0) {
+                    out = { ...out, ...normalizeMachineRow(v[0]) };
+                }
+            }
+            return out;
+        }
+
+        function pickKpiValue(obj, keys) {
+            for (const k of keys) {
+                if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
+            }
+            return undefined;
+        }
+
+        const KPI_DEFINITIONS = [
+            { label: 'OEE', keys: ['oee', 'OEE', 'overall_oee', 'oee_percent', 'oee_pct'], suffix: '%' },
+            { label: 'Output', keys: ['output', 'units_produced', 'production_count', 'units', 'production'], suffix: ' units' },
+            { label: 'Efficiency', keys: ['efficiency', 'efficiency_percent', 'eff'], suffix: '%' },
+            { label: 'Temperature', keys: ['temperature', 'temp', 'temp_c', 'temperature_c'], suffix: '°C' },
+            { label: 'Power Usage', keys: ['power_usage', 'power', 'power_percent', 'power_kw'], suffix: '%' },
+            { label: 'Speed', keys: ['speed', 'rpm', 'spindle_speed', 'shaft_speed'], suffix: ' RPM' },
+            { label: 'Cycle Time', keys: ['cycle_time', 'cycle_time_sec', 'ct', 'cycle'], suffix: ' sec' },
+            { label: 'Downtime', keys: ['downtime', 'downtime_percent', 'downtime_pct'], suffix: '%' }
+        ];
+
+        /** One table + FK: try a few orderings so we get latest row without spamming invalid columns. */
+        async function tryFetchRelatedKpiRow(table, fk, id) {
+            const attempts = [
+                () => window.supabaseClient.from(table).select('*').eq(fk, id).order('created_at', { ascending: false }).limit(1),
+                () => window.supabaseClient.from(table).select('*').eq(fk, id).order('recorded_at', { ascending: false }).limit(1),
+                () => window.supabaseClient.from(table).select('*').eq(fk, id).order('id', { ascending: false }).limit(1),
+                () => window.supabaseClient.from(table).select('*').eq(fk, id).limit(1)
+            ];
+            for (const run of attempts) {
+                const { data, error } = await run();
+                if (error) continue;
+                if (data && data.length > 0) return data[0];
+            }
+            return null;
+        }
+
+        /** Pull KPI rows from common related tables (PostgREST: missing table returns error — we skip). */
+        async function enrichMachineWithKpis(machine) {
+            let merged = normalizeMachineRow({ ...machine });
+            const id = merged.id ?? merged.machine_id;
+            if (id === undefined || id === null) {
+                logDebug('No machine id — skipping related KPI fetch', 'warning');
+                return merged;
+            }
+
+            const tables = [
+                'kpis',
+                'machine_kpis',
+                'kpi_metrics',
+                'metrics',
+                'machine_metrics',
+                'performance_data',
+                'machine_performance'
+            ];
+            const fkList = ['machine_id', 'equipment_id', 'device_id'];
+
+            for (const table of tables) {
+                let row = null;
+                for (const fk of fkList) {
+                    row = await tryFetchRelatedKpiRow(table, fk, id);
+                    if (row) break;
+                }
+                if (row) {
+                    merged = { ...merged, ...normalizeMachineRow(row) };
+                    logDebug(`Merged KPI data from table "${table}"`, 'success');
+                }
+            }
+            return merged;
+        }
+        
+        // ==================== SUPABASE FUNCTIONS ====================
+        async function testSupabaseConnection() {
+            try {
+                updateLoading('Testing Supabase connection...');
+                logDebug('Testing Supabase connection...', 'info');
+                
+                // Try machines + embedded KPI relation (single round-trip when FK exists)
+                updateLoading('Fetching from machines table...');
+                const embedSelects = [
+                    '*, machine_kpis(*)',
+                    '*, kpis(*)',
+                    '*, kpi_metrics(*)'
+                ];
+                let machines = null;
+                let error = null;
+                for (const sel of embedSelects) {
+                    const res = await window.supabaseClient.from('machines').select(sel).limit(10);
+                    if (!res.error && res.data && res.data.length > 0) {
+                        machines = res.data;
+                        logDebug(`Loaded machines with embedded KPI select: ${sel}`, 'success');
+                        break;
+                    }
+                }
+                if (!machines) {
+                    const res = await window.supabaseClient.from('machines').select('*').limit(10);
+                    machines = res.data;
+                    error = res.error;
+                }
+                
+                if (error) {
+                    logDebug(`Error fetching machines: ${error.message}`, 'error');
+                    
+                    // Try alternative table names
+                    const tableNames = ['assembly_machines', 'factory_machines', 'equipment', 'devices'];
+                    
+                    for (const tableName of tableNames) {
+                        logDebug(`Trying table: ${tableName}`, 'info');
+                        const { data: altData, error: altError } = await window.supabaseClient
+                            .from(tableName)
+                            .select('*')
+                            .limit(5);
+                        
+                        if (!altError && altData && altData.length > 0) {
+                            logDebug(`Found data in ${tableName}: ${altData.length} records`, 'success');
+                            return { data: altData, table: tableName };
+                        }
+                    }
+                    
+                    throw new Error('No machine data found in any table');
+                }
+                
+                if (machines && machines.length > 0) {
+                    logDebug(`Found ${machines.length} machines in database`, 'success');
+                    return { data: machines, table: 'machines' };
+                } else {
+                    logDebug('Machines table exists but is empty', 'warning');
+                    return { data: [], table: 'machines' };
+                }
+                
+            } catch (error) {
+                logDebug(`Supabase test failed: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+        
+        async function loadAllMachines() {
+            try {
+                const result = await testSupabaseConnection();
+                machinesData = result.data.map((m) => normalizeMachineRow(m));
+                
+                // Create QR code mapping
+                machinesMap.clear();
+                machinesData.forEach(machine => {
+                    // Try to get QR code from various possible fields
+                    const qrCode = machine.qr_code || machine.qrcode || machine.code || machine.id || `MACHINE_${machine.id}`;
+                    machinesMap.set(qrCode, machine);
+                    logDebug(`Mapped QR ${qrCode} → ${machine.name || machine.machine_name || 'Unknown'}`, 'info');
+                });
+                
+                document.getElementById('machine-count').textContent = machinesData.length;
+                document.getElementById('data-source').textContent = `Supabase (${result.table})`;
+                
+                if (machinesData.length === 0) {
+                    logDebug('⚠️ WARNING: No machines found in database', 'error');
+                    showError('No machines found in database. Please add data to your Supabase table.');
+                    return false;
+                }
+                
+                logDebug(`✅ Successfully loaded ${machinesData.length} machines`, 'success');
+                return true;
+                
+            } catch (error) {
+                logDebug(`❌ Failed to load machines: ${error.message}`, 'error');
+                showError(`Database error: ${error.message}`);
+                return false;
+            }
+        }
+        
+        function getMachineByQR(qrCode) {
+            // Try exact match first
+            if (machinesMap.has(qrCode)) {
+                return machinesMap.get(qrCode);
+            }
+            
+            // Try case-insensitive match
+            for (const [key, machine] of machinesMap.entries()) {
+                if (key.toLowerCase() === qrCode.toLowerCase()) {
+                    return machine;
+                }
+            }
+            
+            // Try partial match
+            for (const [key, machine] of machinesMap.entries()) {
+                if (key.includes(qrCode) || qrCode.includes(key)) {
+                    return machine;
+                }
+            }
+            
+            logDebug(`❌ No machine found for QR: ${qrCode}`, 'error');
+            return null;
+        }
+        
+        // ==================== CAMERA FUNCTIONS ====================
+        async function startCamera() {
+            try {
+                updateLoading('Starting camera...');
+                
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+                
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: false
+                });
+                
+                const video = document.getElementById('video');
+                video.srcObject = stream;
+                
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+                
+                // Show UI
+                document.getElementById('loading-screen').style.display = 'none';
+                document.getElementById('camera-container').style.display = 'block';
+                
+                // Start scanning
+                scanning = true;
+                scanQRCode();
+                
+                logDebug('✅ Camera started successfully', 'success');
+                
+            } catch (error) {
+                logDebug(`❌ Camera error: ${error.message}`, 'error');
+                showError(`Camera error: ${error.message}. Please check permissions.`);
+            }
+        }
+        
+        function scanQRCode() {
+            if (!scanning) return;
+            
+            try {
+                const video = document.getElementById('video');
+                const canvas = document.getElementById('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                if (!video.readyState || video.readyState < 2) {
+                    requestAnimationFrame(scanQRCode);
+                    return;
+                }
+                
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                const scannerSize = 250;
+                const scanX = (canvas.width - scannerSize) / 2;
+                const scanY = (canvas.height - scannerSize) / 2;
+                
+                const imageData = ctx.getImageData(scanX, scanY, scannerSize, scannerSize);
+                const code = jsQR(imageData.data, scannerSize, scannerSize);
+                
+                if (code) {
+                    void handleQRDetected(code.data).catch((e) => logDebug(`QR handler: ${e.message}`, 'error'));
+                }
+                
+            } catch (error) {
+                logDebug(`Scan error: ${error.message}`, 'error');
+            }
+            
+            requestAnimationFrame(scanQRCode);
+        }
+        
+        // ==================== QR HANDLING ====================
+        let lastDetection = 0;
+        
+        async function handleQRDetected(qrData) {
+            const now = Date.now();
+            if (now - lastDetection < 2000) return; // 2 second cooldown
+            
+            lastDetection = now;
+            logDebug(`📱 QR detected: ${qrData}`, 'info');
+            
+            const machine = getMachineByQR(qrData);
+            if (machine) {
+                try {
+                    const withKpis = await enrichMachineWithKpis(machine);
+                    showMachinePanel(withKpis);
+                } catch (e) {
+                    logDebug(`KPI fetch error (showing machine row only): ${e.message}`, 'error');
+                    showMachinePanel(normalizeMachineRow(machine));
+                }
+                updateDetectionCount();
+                playBeep();
+            } else {
+                logDebug(`❌ No Supabase data for: ${qrData}`, 'error');
+                showErrorPanel(`No data in Supabase for: ${qrData}`);
+            }
+        }
+        
+        function testQR(qrCode) {
+            logDebug(`🧪 Testing QR: ${qrCode}`, 'info');
+            void handleQRDetected(qrCode).catch((e) => logDebug(`testQR: ${e.message}`, 'error'));
+        }
+        
+        function updateDetectionCount() {
+            const countElement = document.getElementById('detection-count');
+            const current = parseInt(countElement.textContent) || 0;
+            countElement.textContent = current + 1;
+            countElement.style.color = '#00ff88';
+            
+            setTimeout(() => {
+                countElement.style.color = 'white';
+            }, 1000);
+        }
+        
+        // ==================== UI FUNCTIONS ====================
+        function showMachinePanel(machine) {
+            const panel = document.getElementById('kpi-panel');
+            const content = document.getElementById('panel-content');
+            
+            // Build machine info HTML
+            let html = `
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #00ff88; margin-bottom: 10px;">${machine.name || machine.machine_name || 'Unknown Machine'}</h3>
+                    <div class="kpi-item"><span class="kpi-label">ID:</span><span class="kpi-value">${machine.id || 'N/A'}</span></div>
+                    <div class="kpi-item"><span class="kpi-label">Type:</span><span class="kpi-value">${machine.type || machine.machine_type || 'N/A'}</span></div>
+                    <div class="kpi-item"><span class="kpi-label">Status:</span><span class="kpi-value" style="color: #00ff88;">${machine.status || 'Unknown'}</span></div>
+                    <div class="kpi-item"><span class="kpi-label">Location:</span><span class="kpi-value">${machine.location || machine.area || 'N/A'}</span></div>
+                </div>
+                
+                <div style="margin-bottom: 20px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.2);">
+                    <h4 style="color: #aaa; margin-bottom: 10px;">Performance KPIs</h4>
+            `;
+            
+            // KPIs: use merged row + many DB column aliases; related tables merged in enrichMachineWithKpis
+            const m = normalizeMachineRow(machine);
+            let kpiCount = 0;
+            KPI_DEFINITIONS.forEach((def) => {
+                const value = pickKpiValue(m, def.keys);
+                if (value !== undefined && value !== null && value !== '') {
+                    kpiCount++;
+                    html += `
+                        <div class="kpi-item">
+                            <span class="kpi-label">${def.label}:</span>
+                            <span class="kpi-value">${value}${def.suffix}</span>
+                        </div>
+                    `;
+                }
+            });
+            if (kpiCount === 0) {
+                html += `
+                    <p style="color:#ffaa00;font-size:13px;margin-top:8px;line-height:1.4;">
+                        No KPI fields found. Add columns (e.g. oee, output) on the machine row, a JSON <code style="color:#ccc;">metrics</code> object,
+                        or a related table such as <code style="color:#ccc;">machine_kpis</code> with <code style="color:#ccc;">machine_id</code>.
+                    </p>
+                `;
+            }
+            html += `</div>`;
+            
+            // Add maintenance info
+            const mMaint = normalizeMachineRow(machine);
+            if (mMaint.last_maintenance || mMaint.next_service) {
+                html += `
+                    <div style="margin-top: 20px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.2);">
+                        <h4 style="color: #aaa; margin-bottom: 10px;">Maintenance</h4>
+                        ${mMaint.last_maintenance ? `<div class="kpi-item"><span class="kpi-label">Last:</span><span class="kpi-value">${mMaint.last_maintenance}</span></div>` : ''}
+                        ${mMaint.next_service ? `<div class="kpi-item"><span class="kpi-label">Next:</span><span class="kpi-value">${mMaint.next_service}</span></div>` : ''}
+                    </div>
+                `;
+            }
+            
+            content.innerHTML = html;
+            panel.classList.add('active');
+            
+            logDebug(`📊 Displaying data for: ${machine.name || machine.id}`, 'success');
+        }
+        
+        function hidePanel() {
+            document.getElementById('kpi-panel').classList.remove('active');
+        }
+        
+        function showErrorPanel(message) {
+            const panel = document.getElementById('kpi-panel');
+            const content = document.getElementById('panel-content');
+            
+            content.innerHTML = `
+                <div style="text-align: center; padding: 20px;">
+                    <div style="color: #ff5555; font-size: 48px; margin-bottom: 20px;">⚠️</div>
+                    <h3 style="color: #ff5555; margin-bottom: 10px;">Not Found in Database</h3>
+                    <p>${message}</p>
+                    <p style="color: #aaa; font-size: 12px; margin-top: 20px;">
+                        Available QR codes: ${Array.from(machinesMap.keys()).join(', ')}
+                    </p>
+                </div>
+            `;
+            
+            panel.classList.add('active');
+        }
+        
+        function showError(message) {
+            document.getElementById('loading-screen').style.display = 'none';
+            document.getElementById('error-message').textContent = message;
+            document.getElementById('error-screen').style.display = 'flex';
+            logDebug(`Error displayed: ${message}`, 'error');
+        }
+        
+        function retryConnection() {
+            document.getElementById('error-screen').style.display = 'none';
+            document.getElementById('loading-screen').style.display = 'flex';
+            initializeApp();
+        }
+        
+        function playBeep() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.value = 800;
+                oscillator.type = 'sine';
+                
+                gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+                
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.2);
+            } catch (e) {
+                // Audio not supported, silently fail
+            }
+        }
+        
+        // ==================== INITIALIZATION ====================
+        async function initializeApp() {
+            logDebug('=== STARTING APP ===', 'info');
+            
+            // Check for camera support
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showError('Your browser does not support camera access. Please use Chrome or Firefox.');
+                return;
+            }
+            
+            // Load data from Supabase FIRST
+            updateLoading('Connecting to Supabase database...');
+            const dataLoaded = await loadAllMachines();
+            
+            if (!dataLoaded) {
+                logDebug('Data load failed, stopping initialization', 'error');
+                return;
+            }
+            
+            // Start camera
+            updateLoading('Starting camera...');
+            await startCamera();
+            
+            logDebug('=== APP READY ===', 'success');
+        }
+        
+        // Start the app
+        window.addEventListener('load', initializeApp);
+        
+        // Enable debug by default for troubleshooting
+        setTimeout(() => {
+            debugMode = true;
+            document.getElementById('debug-panel').classList.add('active');
+            logDebug('Debug mode auto-enabled for troubleshooting', 'info');
+        }, 1000);
+    </script>
+</body>
+</html>
